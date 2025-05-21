@@ -1,0 +1,131 @@
+/* ============================ uart.c =============================
+   Rutinas básicas de UART con “línea por línea” y buffer circular
+   ─────────────────────────────────────────────────────────────────
+   • uart_init(baud)        – configura USART0 a la velocidad dada
+   • uart_write_char(c)     – transmite un byte (bloqueante)
+   • uart_write_str(str)    – transmite una cadena terminada en '\0'
+   • uart_available()       – ¿hay una línea completa recibida?
+   • uart_read_cmd(dest)    – copia la línea (sin '\n') y la reinicia
+   El buffer guarda caracteres hasta recibir '\n'. El ISR se encarga
+   de rellenarlo y marcarlo disponible.
+   =============================================================== */
+
+#ifndef F_CPU
+#define F_CPU 16000000UL                 /* valor por defecto si no viene de gcc -D */
+#endif
+
+#include "uart.h"
+#include <avr/io.h>
+#include <avr/interrupt.h>
+
+/* ------------------- Buffer de recepción ------------------- */
+static volatile char    buf[RX_BUF];     /* almacena la línea */
+static volatile uint8_t idx   = 0;       /* índice de escritura */
+static volatile uint8_t ready = 0;       /* 1 → línea completa disponible */
+
+/* ------------------------------------------------------------
+   Inicializa UART0 en modo asíncrono 8-N-1 a 'baud' baudios
+------------------------------------------------------------ */
+void uart_init(uint32_t baud)
+{
+    uint16_t ubrr = (F_CPU / 16 / baud) - 1;   /* fórmula datasheet */
+    UBRR0H = ubrr >> 8;
+    UBRR0L = ubrr & 0xFF;
+
+    UCSR0A = 0;                                /* modo normal        */
+    UCSR0B = (1<<RXCIE0) | (1<<RXEN0) | (1<<TXEN0);  /* RX int + RX + TX */
+    UCSR0C = (1<<UCSZ01) | (1<<UCSZ00);               /* 8 data, 1 stop  */
+
+    sei();                                     /* Activa global INT  */
+}
+
+/* Transmite un byte (bloqueante) -------------------------------------- */
+void uart_write_char(char c)
+{
+    while (!(UCSR0A & (1<<UDRE0)));            /* espera buffer vacío */
+    UDR0 = c;
+}
+
+/* Transmite una cadena terminada en NULL ------------------------------ */
+void uart_write_str(const char *s)
+{
+    while (*s) uart_write_char(*s++);
+}
+
+/* ¿Hay línea disponible? (flag puesto por el ISR) --------------------- */
+uint8_t uart_available(void) { return ready; }
+
+/* Copia la línea a 'dest' y reinicia el buffer ------------------------ */
+void uart_read_cmd(char *dest)
+{
+    cli();                                     /* sección crítica */
+    for (uint8_t i = 0; i < idx; i++)
+        dest[i] = buf[i];
+    dest[idx] = '\0';                          /* termina la cadena */
+    idx = 0;
+    ready = 0;
+    sei();
+}
+
+/* ================= ISR de recepción =========================
+   Guarda cada carácter hasta '\n'. Al recibir '\n' marca ready.
+   Protege el buffer de desbordes: máximo RX_BUF-1 caracteres.
+---------------------------------------------------------------- */
+ISR(USART_RX_vect)
+{
+    char c = UDR0;                             /* lee el byte RX    */
+
+    if (c == '\n') {                           /* fin de línea      */
+        ready = 1;
+    }
+    else if (idx < RX_BUF - 1) {               /* añade si hay espacio */
+        buf[idx++] = c;
+    }
+    /* si el buffer se llena, se descartan caracteres hasta '\n' */
+}
+/* ============================== uart.h ===============================
+   Cabecera para la interfaz UART “línea-a-línea”
+   ─────────────────────────────────────────────────────────────────────
+   El módulo permite enviar cadenas y recibir comandos terminados en
+   '\n' sin bloquear el bucle principal:
+
+        uart_init(9600);          // abre USART0 a 9600 baudios
+
+        if (uart_available()) {   // ¿llegó línea completa?
+            char cmd[RX_BUF];
+            uart_read_cmd(cmd);   // copia la línea (sin '\n')
+            ...
+        }
+
+   TX se realiza con uart_write_char() o uart_write_str().
+
+   El tamaño del buffer circular (RX_BUF) determina la longitud máxima
+   de línea que puede recibirse (N-1 caracteres + '\n').
+   ==================================================================== */
+
+#ifndef UART_H
+#define UART_H
+
+#include <stdint.h>
+
+/* --------------- Ajustes del driver ---------------- */
+#define RX_BUF  32        /* capacidad del buffer de recepción */
+
+/* --------------- API pública ----------------------- */
+
+/* Configura USART0 a 'baud' baudios (8-N-1, sin control de flujo) */
+void uart_init(uint32_t baud);
+
+/* Devuelve 1 si el ISR ha recibido una línea completa (“\n”).     */
+uint8_t uart_available(void);
+
+/* Copia la línea recibida (sin '\n') en 'dest' y limpia el buffer */
+void uart_read_cmd(char *dest);
+
+/* Transmite un byte (bloqueante hasta que el registro quede libre) */
+void uart_write_char(char c);
+
+/* Transmite una cadena terminada en NULL                          */
+void uart_write_str(const char *s);
+
+#endif /* UART_H */
