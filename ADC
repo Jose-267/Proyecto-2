@@ -1,0 +1,89 @@
+/* =============================== adc.c ===============================
+   Rutinas de inicialización y lectura del conversor A/D del ATmega328P
+   ─────────────────────────────────────────────────────────────────────
+   Canales utilizados en este proyecto
+       ADC0 → potenciómetro servo B
+       ADC1 → potenciómetro servo A
+       ADC2 → potenciómetro servo C
+       ADC3 → potenciómetro motor DC
+   ==================================================================== */
+
+#include "adc.h"
+#include <avr/io.h>
+
+/* --------------------------------------------------------------------
+   ADC_init()
+   Configura el ADC para:
+     • Referencia AVcc (5 V)
+     • Frecuencia del reloj ≈ 125 kHz  (16 MHz / 128)
+     • Desactiva las entradas digitales en los pines usados como ADC
+--------------------------------------------------------------------- */
+void ADC_init(void)
+{
+    /* ---------- Fuente de referencia ----------
+       REFS0 = 1 → usa AVcc (+ un condensador en AREF)                */
+    ADMUX = (1 << REFS0);
+
+    /* ---------- Prescaler ----------
+       Con F_CPU = 16 MHz, dividir por 128 → 125 kHz dentro
+       del rango recomendado (50-200 kHz)                             */
+    ADCSRA =  (1 << ADEN)  |                  /* habilita el ADC      */
+              (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0); /* presc /128 */
+
+    /* ---------- Ahorro de energía ----------
+       Deshabilita el buffer digital de los pines ADC0-ADC2
+       (menor consumo y menos ruido en esas entradas)                 */
+    DIDR0  = (1 << ADC0D) | (1 << ADC1D) | (1 << ADC2D);
+}
+
+/* --------------------------------------------------------------------
+   uint16_t ADC_read(channel)
+   Devuelve la conversión de 10 bits del canal solicitado (0-7)
+   Bloqueante: espera a que termine la conversión.
+--------------------------------------------------------------------- */
+uint16_t ADC_read(uint8_t channel)
+{
+    /* Selecciona canal sin tocar REFS bits (mantén AVcc)             */
+    ADMUX = (ADMUX & 0xF0) | (channel & 0x0F);
+
+    ADCSRA |= (1 << ADSC);            /* inicia conversión           */
+    while (ADCSRA & (1 << ADSC));     /* espera a que ADSC vuelva 0  */
+
+    return ADC;                       /* lectura de 10 bits (ADCL+H) */
+}
+/* ============================== adc.h ===============================
+   Prototipos para manejar el conversor analógico/digital del ATmega328P
+   ─────────────────────────────────────────────────────────────────────
+   Uso típico:
+
+       ADC_init();               // una sola vez al arrancar
+
+       uint16_t val = ADC_read(0);   // lee canal ADC0 (0-1023)
+   ==================================================================== */
+
+#ifndef ADC_H_
+#define ADC_H_
+
+#include <stdint.h>
+
+/* -------------------------------------------------------------------
+   ADC_init()
+   Configura:
+
+   • Referencia           : AVcc (≈5 V)            → REFS0 = 1
+   • Resolución           : 10 bits               → modo por defecto
+   • Frecuencia de reloj  : 125 kHz ( 16 MHz /128 ) → ADPS2..0 = 111
+   • Entradas digitales   : deshabilita buffer en ADC0-ADC2 para
+                            reducir consumo y ruido (DIDR0)
+-------------------------------------------------------------------- */
+void     ADC_init(void);
+
+/* -------------------------------------------------------------------
+   ADC_read(channel)
+   Realiza una conversión bloqueante en el canal 0-7 y devuelve
+   el valor de 10 bits (0-1023).  Cambia sólo los bits MUX3..0 de ADMUX,
+   preservando la referencia seleccionada en ADC_init().
+-------------------------------------------------------------------- */
+uint16_t ADC_read(uint8_t channel);
+
+#endif /* ADC_H_ */
