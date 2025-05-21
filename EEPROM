@@ -1,0 +1,34 @@
+/* ======================== eeprom_layout.h =========================
+   Mapa y utilidades para almacenar presets en la EEPROM interna
+   ──────────────────────────────────────────────────────────────────
+   Cada “slot” guarda 4 palabras de 16-bit (8 bytes en total):
+       [0] Servo A   (OCR1A)
+       [1] Servo B   (OCR1B)
+       [2] Servo C   (µs)
+       [3] Motor DC  (dir | duty)
+
+   Con NUM_SLOTS = 4 el consumo total es  4 × 8 = 32 bytes,
+   muy por debajo de los 1024 bytes disponibles en el ATmega328P.
+   ================================================================= */
+
+#ifndef EEPROM_LAYOUT_H
+#define EEPROM_LAYOUT_H
+
+#include <avr/eeprom.h>
+
+#define NUM_SLOTS   4          /* Nº de presets disponibles        */
+#define SLOT_SIZE   8          /* 4 × uint16_t = 8 bytes por slot  */
+
+/* -----------------------------------------------------------------
+   ee_addr(slot, offset)
+   Devuelve la dirección absoluta dentro de la EEPROM para:
+       slot   : 0 … NUM_SLOTS-1
+       offset : 0 … 7  (desplazamiento en bytes dentro del slot)
+   Ejemplo:  ee_addr(2, 0)  → 16  (tercer slot, primer word)
+------------------------------------------------------------------ */
+static inline uint16_t ee_addr(uint8_t slot, uint8_t offset)
+{
+    return (uint16_t)(slot * SLOT_SIZE + offset);
+}
+
+#endif /* EEPROM_LAYOUT_H */
