@@ -1,0 +1,124 @@
+/* =========================== motor.c =========================== */
+/* Rutinas de control del motor DC con puente H y PWM (Timer-0)
+   ────────────────────────────────────────────────────────────────
+   PD6  → PWM (OC0A)  – velocidad
+   PD4  → DIR_A_PIN   – sentido horario  (IN1 del L293D)
+   PD5  → DIR_B_PIN   – sentido antihorario (IN2 del L293D)
+*/
+
+#include "motor.h"
+#include <avr/io.h>
+
+/* ------------------ Alias de pines ------------------ */
+#define PWM_PIN   PD6          /* OC0A */
+#define DIR_A_PIN PD4          /* IN1 */
+#define DIR_B_PIN PD5          /* IN2 */
+
+/* ==================================================== */
+/*      Inicialización de Timer-0 en Fast-PWM           */
+/* ==================================================== */
+static void pwm_init(void)
+{
+    DDRD  |= (1 << PWM_PIN);            /* PD6 como salida PWM          */
+
+    /* OC0A en modo “Clear on compare, set on TOP” + Fast PWM 8-bit     */
+    TCCR0A = (1 << COM0A1) | (1 << WGM00);
+
+    /* Prescaler = 8 → 16 MHz / 8 / 256 ≈ 7,8 kHz de frecuencia PWM     */
+    TCCR0B = (1 << CS01);
+
+    OCR0A  = 0;                         /* duty = 0 % al arrancar       */
+}
+
+/* Configura los pines de dirección y llama a pwm_init() */
+void motor_init(void)
+{
+    /* DIR_A y DIR_B salidas digitales */
+    DDRD  |= (1 << DIR_A_PIN) | (1 << DIR_B_PIN);
+    /* Ambos en bajo → motor libre (coast) */
+    PORTD &= ~((1 << DIR_A_PIN) | (1 << DIR_B_PIN));
+
+    pwm_init();
+}
+
+/* ==================================================== */
+/*      Conversor “potenciómetro ↔ PWM simétrico”       */
+/* ====================================================
+   Recibe un valor ADC de 0-1023 y genera:
+   • Sentido horario   (PD4=1, PD5=0) si adc > CENTER+DBAND
+   • Sentido antihorario               si adc < CENTER-DBAND
+   • Parado                                en la zona muerta
+   Escala linealmente cada semirango al duty 0-255 y
+   satura al 100 % cuando el potenciómetro llega al extremo.
+*/
+void motor_set_from_adc(uint16_t adc)
+{
+    const uint16_t CENTER = 512;   /* punto medio del potenciómetro          */
+    const uint8_t  DBAND  = 8;     /* ancho de la zona muerta (±8 cuentas)   */
+    const uint8_t  SAT    = 5;     /* margen antes del extremo para 100 %    */
+
+    /* ---------- Giro horario ---------- */
+    if (adc > CENTER + DBAND)
+    {
+        uint16_t span = adc - (CENTER + DBAND);          /* 0-511 */
+        uint8_t  duty = (uint32_t)span * 255 / (511 - DBAND);
+
+        if (adc >= 1023U - SAT) duty = 255;              /* saturar al final */
+
+        PORTD |=  (1 << DIR_A_PIN);                      /* IN1 = 1 */
+        PORTD &= ~(1 << DIR_B_PIN);                      /* IN2 = 0 */
+        OCR0A  = duty;                                   /* aplica duty */
+    }
+    /* ---------- Giro antihorario ---------- */
+    else if (adc < CENTER - DBAND)
+    {
+        uint16_t span = (CENTER - DBAND) - adc;
+        uint8_t  duty = (uint32_t)span * 255 / (511 - DBAND);
+
+        if (adc <= SAT) duty = 255;                      /* saturar al final */
+
+        PORTD &= ~(1 << DIR_A_PIN);                      /* IN1 = 0 */
+        PORTD |=  (1 << DIR_B_PIN);                      /* IN2 = 1 */
+        OCR0A  = duty;
+    }
+    /* ---------- Parado / zona muerta ---------- */
+    else
+    {
+        OCR0A = 0;                                       /* duty 0 % */
+    }
+}
+
+
+/* ========================== motor.h ========================== */
+/* API pública para controlar un motor DC con puente H           *
+ *                                                               *
+ *  • motor_init()         – configura Timer-0 (PWM) y pines DIR *
+ *  • motor_set_from_adc() – convierte una lectura ADC (0-1023)  *
+ *                           en velocidad + sentido              *
+ *                                                               *
+ *  El código de la implementación está en motor.c               */
+
+#ifndef MOTOR_H
+#define MOTOR_H
+
+#include <stdint.h>
+
+/* ------------------------------------------------------------------
+   Inicializa:
+   ── Timer-0 en Fast-PWM (salida OC0A = PD6)
+   ── Pines de dirección (PD4, PD5) como salidas y en estado ‘coast’
+   Llamar UNA sola vez al arrancar.
+-------------------------------------------------------------------*/
+void motor_init(void);
+
+/* ------------------------------------------------------------------
+   Convierte la lectura cruda del potenciómetro (0-1023 ADC) en
+   giro horario, antihorario o paro:
+       adc < 512-DBAND  → reversa    (duty proporcional)
+       adc en zona muerta→ parado     (duty = 0)
+       adc > 512+DBAND  → adelante   (duty proporcional)
+   La escala y la banda muerta se definen en motor.c
+-------------------------------------------------------------------*/
+void motor_set_from_adc(uint16_t adc_val);
+
+#endif /* MOTOR_H */
