@@ -1,0 +1,136 @@
+/* ======================= preset.c ===========================
+   Guarda y recupera “presets” (posiciones) en la EEPROM interna
+   ─────────────────────────────────────────────────────────────
+
+   Cada slot ocupa 8 bytes y contiene:
+        [0]  Servo A (OCR1A)  – 16 bit
+        [1]  Servo B (OCR1B)  – 16 bit
+        [2]  Servo C (µs)     – 16 bit (se convierte ↔ OCR2B)
+        [3]  Motor  (duty + sentido) – 16 bit  [dir | duty]
+
+   Funciones públicas:
+       preset_save(slot)  – guarda el estado actual en el slot 0-3
+       preset_load(slot)  – restaura el slot al hardware
+   La macro  ee_addr(slot,offset) se define en eeprom_layout.h
+   ============================================================ */
+
+#include <avr/io.h>
+#include <avr/eeprom.h>
+#include "preset.h"
+#include "eeprom_layout.h"
+
+/* ------------------------------------------------------------
+   Conversión Servo C  (Timer-2, OCR2B)  ↔  microsegundos
+   Fórmula inversa del mapeo usado en servoC_setDuty():
+       µs ≈ OCR2B·64 – 32        (resolución ≈ 0,5°)
+------------------------------------------------------------ */
+static inline uint16_t servoC_to_eep(void)        /* OCR2B → µs */
+{
+    return (uint16_t)OCR2B * 64U - 32U;
+}
+
+static inline void servoC_from_eep(uint16_t us)   /* µs → OCR2B */
+{
+    if (us < 1000) us = 1000;
+    if (us > 2500) us = 2500;
+    OCR2B = (uint8_t)((us + 32U) / 64U);
+}
+
+/* ------------------------------------------------------------
+   Motor helpers
+   Empaqueta (duty + dirección) en un word para la EEPROM
+------------------------------------------------------------ */
+#define DIR_A PD4     /* pin real de sentido A (IN1) */
+#define DIR_B PD5     /* pin real de sentido B (IN2) */
+
+/* Codifica: [dir en bit-8] | [duty 0-255] */
+static inline uint16_t motor_pack(void)
+{
+    uint8_t duty = OCR0A;                         /* PWM actual */
+    uint8_t dir  = (PORTD & (1<<DIR_A)) ? 1 : 0;  /* 1 = adelante */
+    return (dir << 8) | duty;
+}
+
+/* Aplica al hardware el word leído de EEPROM */
+static inline void motor_unpack(uint16_t w)
+{
+    uint8_t duty =  w & 0xFF;
+    uint8_t dir  = (w >> 8) & 1;
+
+    if (dir) {                        /* adelanta */
+        PORTD |=  (1<<DIR_A);
+        PORTD &= ~(1<<DIR_B);
+    } else {                          /* reversa  */
+        PORTD |=  (1<<DIR_B);
+        PORTD &= ~(1<<DIR_A);
+    }
+    OCR0A = duty;                     /* velocidad */
+}
+
+/* ============================================================
+   Guarda el preset ‘slot’ (0-3).  Escribe sólo si cambia
+============================================================ */
+void preset_save(uint8_t slot)
+{
+    uint16_t adr = ee_addr(slot, 0);            /* dirección base */
+
+    uint16_t buf[4] = {
+        OCR1A,                   /* Servo A */
+        OCR1B,                   /* Servo B */
+        servoC_to_eep(),         /* Servo C en µs */
+        motor_pack()             /* Motor (dir|duty) */
+    };
+
+    for (uint8_t i = 0; i < 4; i++, adr += 2)
+        eeprom_update_word((uint16_t*)adr, buf[i]);   /* escribe solo si cambia */
+}
+
+/* ============================================================
+   Carga preset ‘slot’ y lo aplica al hardware
+============================================================ */
+void preset_load(uint8_t slot)
+{
+    uint16_t adr = ee_addr(slot, 0);
+    uint16_t buf[4];
+
+    for (uint8_t i = 0; i < 4; i++, adr += 2)
+        buf[i] = eeprom_read_word((uint16_t*)adr);
+
+    OCR1A = buf[0];               /* Servo A                             */
+    OCR1B = buf[1];               /* Servo B                             */
+    servoC_from_eep(buf[2]);      /* Servo C (convierte µs → OCR2B)      */
+    motor_unpack(buf[3]);         /* Motor DC (dir + duty)               */
+}
+
+/* ========================== preset.h ==========================
+   Interfaz para gestionar “presets” (posiciones) en la EEPROM
+   ──────────────────────────────────────────────────────────────
+   Un *preset* almacena en un slot:
+       • Servo A  (OCR1A)               16-bit
+       • Servo B  (OCR1B)               16-bit
+       • Servo C  (µs)                  16-bit
+       • Motor DC (sentido | duty)      16-bit
+   — 4 palabras * 2 bytes = 8 bytes por slot —
+
+   Slots válidos: 0 – NUM_SLOTS-1  (NUM_SLOTS se define en eeprom_layout.h)
+   ================================================================ */
+
+#ifndef PRESET_H
+#define PRESET_H
+
+#include <stdint.h>
+
+/* ----------------------------------------------------------------
+   Guarda el estado actual de servos y motor en el slot indicado.
+   Se emplea eeprom_update_word(), por lo que la celda sólo se
+   re-escribe si el dato ha cambiado (alarga la vida de la EEPROM).
+-----------------------------------------------------------------*/
+void preset_save(uint8_t slot);
+
+/* ----------------------------------------------------------------
+   Lee el slot solicitado de la EEPROM y lo aplica directamente
+   al hardware (registros OCR y pines de dirección del motor).
+-----------------------------------------------------------------*/
+void preset_load(uint8_t slot);
+
+#endif /* PRESET_H */
