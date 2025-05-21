@@ -1,0 +1,136 @@
+/* ============================ servo.c =============================
+   Control de tres servos con los timers internos del ATmega328P
+   ──────────────────────────────────────────────────────────────────
+   • Servo A  PB1 (OC1A) – rango 3 000-5 000 µs   (±≈45 °)  ⚙ dirección
+   • Servo B  PB2 (OC1B) – rango 1 000-5 000 µs   (±90 °)  ⚙ base
+   • Servo C  PD3 (OC2B) – rango 1 000-2 500 µs   (±60 °)  ⚙ brazo
+
+   Timer-1 → servos A y B     (Fast-PWM, TOP = ICR1, 50 Hz)
+   Timer-2 → servo C          (Fast-PWM, TOP = 0xFF, ≈61 Hz)
+
+   Funciones públicas (servo.h):
+       servo_init()           – configura Timer-1 y deja servos A/B a 1 ms
+       servoA_setDuty(us)     – actualiza ancho de pulso de A   (3-5 ms)
+       servoB_setDuty(us)     –           »          de B       (1-5 ms)
+
+       servoC_init()          – configura Timer-2  y centra servo C
+       servoC_setDuty(us)     – actualiza ancho de pulso de C   (1-2,5 ms)
+====================================================================*/
+
+#include "servo.h"
+#include <avr/io.h>
+#include <util/atomic.h>
+
+/* ------------ Límites genéricos de hobby servos ------------- */
+#define SERVO_MIN_US   1000U      /* ≈ 1 ms  → −90 °            */
+#define SERVO_MAX_US   5000U      /* ≈ 2,5 ms → +90 °           */
+
+/* Servo A utiliza un rango acotado a 3-5 ms (±45 ° aprox.)      */
+#define SERVO_A_MIN    3000U
+#define SERVO_A_MAX    5000U
+
+/* ============================================================= */
+/*               Timer-1   →  Servos A y B                        */
+/* ============================================================= */
+
+/* Con F_CPU = 16 MHz y prescaler 8: 1 tick = 0,5 µs
+   Queremos 20 ms   ⇒  20 000 µs / 0,5 µs = 40 000 ticks        */
+#define T1_ICR1_TOP   40000U
+
+/* ---------- Configura Timer-1 en Fast-PWM (TOP = ICR1) -------- */
+void servo_init(void)
+{
+    /* PB1 (OC1A) y PB2 (OC1B) como salida PWM ------------------ */
+    DDRB |= (1<<DDB1) | (1<<DDB2);
+
+    /* Carga TOP y valores iniciales con interrupciones bloqueadas */
+    ATOMIC_BLOCK(ATOMIC_FORCEON){
+        ICR1  = T1_ICR1_TOP;      /* período 20 ms             */
+        OCR1A = SERVO_MIN_US;     /* ambos arrancan a 1 ms     */
+        OCR1B = SERVO_MIN_US;
+    }
+
+    /* Fast-PWM, TOP = ICR1, no invertir, prescaler = 8 (CS11)   */
+    TCCR1A = (1<<COM1A1)|(1<<COM1B1)|(1<<WGM11);
+    TCCR1B = (1<<WGM13)|(1<<WGM12)|(1<<CS11);
+}
+
+/* Escritura atómica a OCR1x (16 bit) – evita glitch en PWM ------ */
+static inline void write_ocr1(volatile uint16_t *reg, uint16_t val)
+{
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE){
+        *((volatile uint8_t*)reg + 1) = val >> 8;   /* byte alto */
+        *((volatile uint8_t*)reg    ) = val & 0xFF; /* byte bajo */
+    }
+}
+
+/* ---------- Servo A (dirección) 3-5 ms ------------------------ */
+void servoA_setDuty(uint16_t us)
+{
+    if (us < SERVO_A_MIN) us = SERVO_A_MIN;
+    if (us > SERVO_A_MAX) us = SERVO_A_MAX;
+    write_ocr1(&OCR1A, us);
+}
+
+/* ---------- Servo B (base) 1-5 ms ----------------------------- */
+void servoB_setDuty(uint16_t us)
+{
+    if (us < SERVO_MIN_US) us = SERVO_MIN_US;
+    if (us > SERVO_MAX_US) us = SERVO_MAX_US;
+    write_ocr1(&OCR1B, us);
+}
+
+/* ============================================================= */
+/*               Timer-2   →  Servo C (PD3)                       */
+/* ============================================================= */
+
+/* Fast-PWM 8-bit, prescaler = 1024
+   256 cuentas × 64 µs = 16,384 ms  (≈ 61 Hz, suficiente)        */
+void servoC_init(void)
+{
+    DDRD |= (1<<DDD3);                               /* PD3 salida */
+
+    TCCR2A = (1<<COM2B1)|(1<<WGM21)|(1<<WGM20);      /* Fast PWM 8-bit */
+    TCCR2B = (1<<CS22)|(1<<CS21)|(1<<CS20);          /* clk/1024       */
+
+    servoC_setDuty(1500);                            /* centra brazo   */
+}
+
+/* Servo C : 1-2,5 ms → 16-40 counts  (1 count = 64 µs)           */
+void servoC_setDuty(uint16_t us)
+{
+    if (us < SERVO_MIN_US) us = SERVO_MIN_US;
+    if (us > SERVO_MAX_US) us = SERVO_MAX_US;
+
+    OCR2B = (uint8_t)((us + 32U) / 64U);             /* redondeo +0,5 */
+}
+/* ============================== servo.h ==============================
+   Interfaz pública para manejar tres servos estándar con el ATmega328P
+   ─────────────────────────────────────────────────────────────────────
+
+   Timer-1  →  Servo A  (PB1 / OC1A)   y  Servo B  (PB2 / OC1B)
+               Periodo 20 ms  – resolución 0,5 µs (prescaler 8)
+
+   Timer-2  →  Servo C  (PD3 / OC2B)
+               Periodo ≈16,4 ms – resolución 64 µs   (prescaler 1024)
+
+   Las funciones *setDuty()* reciben el ancho de pulso en microsegundos.
+   Los rangos reales y la conversión a registros OCRx se encuentran en
+   servo.c.
+   ====================================================================*/
+
+#ifndef SERVO_H_
+#define SERVO_H_
+
+#include <stdint.h>
+
+/* ---------- Timer-1  :  Servos A y B ------------------------------- */
+void  servo_init(void);                /* Configura Timer-1 y centra A/B        */
+void  servoA_setDuty(uint16_t us);     /* Servo A  (dirección) – pin D9 / PB1   */
+void  servoB_setDuty(uint16_t us);     /* Servo B  (base)       – pin D10 / PB2 */
+
+/* ---------- Timer-2  :  Servo C ------------------------------------ */
+void  servoC_init(void);               /* Configura Timer-2 y centra Servo C    */
+void  servoC_setDuty(uint16_t us);     /* Servo C  (brazo) – pin D3 / PD3       */
+
+#endif /* SERVO_H_ */
